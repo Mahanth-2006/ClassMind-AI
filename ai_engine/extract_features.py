@@ -91,7 +91,7 @@ def estimate_head_pose(landmarks, img_w, img_h):
 
 
 def main():
-    model_path = "models/face_landmarker.task"
+    model_path = "ai_engine/models/face_landmarker.task"
 
     if not os.path.exists(model_path):
         print("Error: Face landmarker model not found.")
@@ -118,8 +118,10 @@ def main():
         face_landmarker_options
     )
 
-    # Initialize Webcam
+    # Initialize Webcam with native 16:9 widescreen resolution
     cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
     if not cap.isOpened():
         print("Error: Could not access webcam.")
@@ -133,14 +135,28 @@ def main():
     csv_writer.writerow([
         "timestamp",
         "face_present",
+        "left_ear",
+        "right_ear",
+        "avg_ear",
+        "blink",
         "head_yaw",
         "head_pitch",
         "head_roll",
-        "blink",
-        "looking_screen"
+        "head_facing_screen"
     ])
 
     start_time = time.time()
+
+    # Explicitly create resizable window with aspect ratio preservation
+    cv2.namedWindow(
+        "ClassMind AI - Feature Stream",
+        cv2.WINDOW_NORMAL
+    )
+    cv2.setWindowProperty(
+        "ClassMind AI - Feature Stream",
+        cv2.WND_PROP_ASPECT_RATIO,
+        cv2.WINDOW_KEEPRATIO
+    )
 
     print(
         "Capturing features... Look at the camera. "
@@ -204,8 +220,10 @@ def main():
                     h
                 )
 
-                # 3. Gaze / Screen Facing Flag
-                looking_screen = 1 if (
+                # 3. Head Orientation Flag
+                # head_facing_screen indicates head orientation toward the screen.
+                # It is not eye-gaze estimation.
+                head_facing_screen = 1 if (
                     abs(yaw) < SCREEN_YAW_LIMIT and
                     abs(pitch) < SCREEN_PITCH_LIMIT
                 ) else 0
@@ -213,11 +231,14 @@ def main():
                 row = [
                     round(current_time, 2),
                     1,
+                    round(ear_l, 4),
+                    round(ear_r, 4),
+                    round(avg_ear, 4),
+                    blink,
                     round(yaw, 2),
                     round(pitch, 2),
                     round(roll, 2),
-                    blink,
-                    looking_screen
+                    head_facing_screen
                 ]
 
             else:
@@ -229,18 +250,23 @@ def main():
                     None,
                     None,
                     0,
+                    None,
+                    None,
+                    None,
                     0
                 ]
 
             csv_writer.writerow(row)
 
             # Draw telemetry on screen
+            ear_disp = f"{row[4]:.2f}" if row[4] is not None else "None"
             status = (
                 f"Face: {row[1]} | "
-                f"Yaw: {row[2]} | "
-                f"Pitch: {row[3]} | "
+                f"Yaw: {row[6]} | "
+                f"Pitch: {row[7]} | "
+                f"EAR: {ear_disp} | "
                 f"Blink: {row[5]} | "
-                f"Screen: {row[6]}"
+                f"Head: {row[9]}"
             )
 
             cv2.putText(
