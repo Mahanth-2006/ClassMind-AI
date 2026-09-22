@@ -1,3 +1,4 @@
+from cv2 import cuda
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -15,14 +16,15 @@ SCREEN_PITCH_LIMIT = 15.0 # Looking up/down beyond 15° means looking away
 LEFT_EYE = [362, 385, 387, 263, 373, 380]
 RIGHT_EYE = [33, 160, 158, 133, 153, 144]
 
-# Generic 3D reference model points for head pose estimation
+# Generic 3D reference model points for head pose estimation (in camera coordinate frame:
+# +X points right, +Y points down towards chin, +Z points away from camera into the scene)
 MODEL_POINTS_3D = np.array([
-    (0.0, 0.0, 0.0),          # Nose tip
-    (0.0, -330.0, -65.0),     # Chin
-    (-225.0, 170.0, -135.0),  # Left eye corner
-    (225.0, 170.0, -135.0),   # Right eye corner
-    (-150.0, -150.0, -125.0), # Left mouth corner
-    (150.0, -150.0, -125.0)   # Right mouth corner
+    (0.0, 0.0, 0.0),          # Nose tip (landmark 1)
+    (0.0, 330.0, 65.0),       # Chin (landmark 152)
+    (-225.0, -170.0, 135.0),  # Right eye outer corner / image left (landmark 33)
+    (225.0, -170.0, 135.0),   # Left eye outer corner / image right (landmark 263)
+    (-150.0, 150.0, 125.0),   # Right mouth corner / image left (landmark 61)
+    (150.0, 150.0, 125.0)     # Left mouth corner / image right (landmark 291)
 ], dtype=np.float64)
 
 # Corresponding landmark indices from MediaPipe Face Mesh
@@ -186,8 +188,7 @@ def main():
             # VIDEO mode requires a timestamp in milliseconds for each frame.
             timestamp_ms = int(current_time * 1000)
 
-            results = face_landmarker.detect_for_video(
-                mp_image,
+            results = face_landmarker.detect_for_video(mp_image,
                 timestamp_ms
             )
 
