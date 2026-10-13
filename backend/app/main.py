@@ -2,7 +2,7 @@ from fastapi import FastAPI
 
 from app.routes.health import router as health_router
 from app.routes.classroom import router as classroom_router
-
+from app.websocket.teacher import router as teacher_ws_router
 # Create FastAPI application
 app = FastAPI(
     title="ClassMind AI Backend",
@@ -12,3 +12,4 @@ app = FastAPI(
 
 app.include_router(health_router)
 app.include_router(classroom_router)
+app.include_router(teacher_ws_router)
