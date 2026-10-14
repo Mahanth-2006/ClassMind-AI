@@ -92,23 +92,66 @@ def estimate_head_pose(landmarks, img_w, img_h):
     return yaw, pitch, roll
 
 
-def main():
-    model_path = "ai_engine/models/face_landmarker.task"
+def check_hand_raised(hand_landmarks, face_landmarks=None, gesture_name="None"):
+    """
+    Checks if a hand is raised in an online classroom posture.
 
-    if not os.path.exists(model_path):
+    Rule:
+    1. Wrist is sufficiently above face/nose level (if face landmarks available)
+       or in the upper portion of the frame (if face not detected).
+    2. Fingertips are pointing upward (middle fingertip above wrist).
+    3. Hand is open (MediaPipe Open_Palm gesture recognized or open fingers).
+    """
+    wrist = hand_landmarks[0]
+    middle_tip = hand_landmarks[12]
+
+    # Hand must be oriented upright (fingertips above wrist in image coordinates)
+    fingers_upright = middle_tip.y < wrist.y
+
+    # Position rule: wrist above nose level if face is present, else upper half of screen
+    if face_landmarks is not None:
+        nose_y = face_landmarks[1].y
+        wrist_above_face = wrist.y < nose_y
+    else:
+        wrist_above_face = wrist.y < 0.5
+
+    # Open hand condition: MediaPipe Open_Palm gesture or fingers extended upward
+    is_open = (gesture_name == "Open_Palm") or (
+        hand_landmarks[8].y < hand_landmarks[6].y and
+        hand_landmarks[12].y < hand_landmarks[10].y and
+        hand_landmarks[16].y < hand_landmarks[14].y
+    )
+
+    return wrist_above_face and fingers_upright and is_open
+
+
+def main():
+    face_model_path = "ai_engine/models/face_landmarker.task"
+    gesture_model_path = "ai_engine/models/gesture_recognizer.task"
+
+    if not os.path.exists(face_model_path):
         print("Error: Face landmarker model not found.")
-        print("Expected:", model_path)
+        print("Expected:", face_model_path)
+        return
+
+    if not os.path.exists(gesture_model_path):
+        print("Error: Gesture recognizer model not found.")
+        print("Expected:", gesture_model_path)
+        print("Please download it from:")
+        print("https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task")
         return
 
     # MediaPipe 1.0.1 uses the Tasks API instead of the older
-    # mp.solutions.face_mesh interface.
+    # mp.solutions interface.
     BaseOptions = mp.tasks.BaseOptions
     FaceLandmarker = mp.tasks.vision.FaceLandmarker
     FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
+    GestureRecognizer = mp.tasks.vision.GestureRecognizer
+    GestureRecognizerOptions = mp.tasks.vision.GestureRecognizerOptions
     RunningMode = mp.tasks.vision.RunningMode
 
     face_landmarker_options = FaceLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path=model_path),
+        base_options=BaseOptions(model_asset_path=face_model_path),
         running_mode=RunningMode.VIDEO,
         num_faces=1,
         min_face_detection_confidence=0.5,
@@ -120,6 +163,19 @@ def main():
         face_landmarker_options
     )
 
+    gesture_recognizer_options = GestureRecognizerOptions(
+        base_options=BaseOptions(model_asset_path=gesture_model_path),
+        running_mode=RunningMode.VIDEO,
+        num_hands=2,
+        min_hand_detection_confidence=0.5,
+        min_hand_presence_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+
+    gesture_recognizer = GestureRecognizer.create_from_options(
+        gesture_recognizer_options
+    )
+
     # Initialize Webcam with native 16:9 widescreen resolution
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -128,6 +184,7 @@ def main():
     if not cap.isOpened():
         print("Error: Could not access webcam.")
         face_landmarker.close()
+        gesture_recognizer.close()
         return
 
     # Prepare CSV Output
@@ -144,10 +201,20 @@ def main():
         "head_yaw",
         "head_pitch",
         "head_roll",
-        "head_facing_screen"
+        "head_facing_screen",
+        "gesture",
+        "gesture_confidence",
+        "hand_raised"
     ])
 
     start_time = time.time()
+    last_timestamp_ms = 0
+
+    # Event tracking and debouncing state to avoid duplicate continuous triggers
+    thumbs_up_active = False
+    thumbs_up_cooldown = 0
+    hand_raised_active = False
+    hand_raised_cooldown = 0
 
     # Explicitly create resizable window with aspect ratio preservation
     cv2.namedWindow(
@@ -185,12 +252,78 @@ def main():
                 data=rgb_frame
             )
 
-            # VIDEO mode requires a timestamp in milliseconds for each frame.
+            # VIDEO mode requires strictly monotonically increasing timestamp in milliseconds
             timestamp_ms = int(current_time * 1000)
+            if timestamp_ms <= last_timestamp_ms:
+                timestamp_ms = last_timestamp_ms + 1
+            last_timestamp_ms = timestamp_ms
 
-            results = face_landmarker.detect_for_video(mp_image,
+            # 1. Run Face Landmarker
+            results = face_landmarker.detect_for_video(
+                mp_image,
                 timestamp_ms
             )
+
+            # 2. Run Gesture Recognizer
+            gesture_results = gesture_recognizer.recognize_for_video(
+                mp_image,
+                timestamp_ms
+            )
+
+            # Process hand gestures and raised hand
+            # Only "Thumb_Up" is recognized/displayed; other gestures default to "None"
+            current_gesture = "None"
+            current_confidence = None
+            hand_raised = 0
+
+            if gesture_results.gestures:
+                for i, hand_gestures in enumerate(gesture_results.gestures):
+                    hand_landmarks = (
+                        gesture_results.hand_landmarks[i]
+                        if i < len(gesture_results.hand_landmarks)
+                        else None
+                    )
+                    top_category = hand_gestures[0] if hand_gestures else None
+
+                    g_name = top_category.category_name if top_category else "None"
+                    g_score = top_category.score if top_category else 0.0
+
+                    # Check for Thumbs Up (only allowed gesture)
+                    if g_name == "Thumb_Up":
+                        current_gesture = "Thumb_Up"
+                        current_confidence = g_score
+
+                    # Check for Hand Raised (uses g_name internally for Open_Palm, without exposing it)
+                    if hand_landmarks is not None:
+                        face_pts = results.face_landmarks[0] if results.face_landmarks else None
+                        if check_hand_raised(hand_landmarks, face_pts, g_name):
+                            hand_raised = 1
+
+            # Event debouncing and state management
+            is_thumbs_up = (current_gesture == "Thumb_Up")
+
+            # Debounce Thumbs Up event: trigger once when gesture appears, don't re-trigger while held
+            if is_thumbs_up:
+                thumbs_up_cooldown = 0
+                if not thumbs_up_active:
+                    thumbs_up_active = True
+                    conf_str = f"{current_confidence:.2f}" if current_confidence is not None else "N/A"
+                    print(f"[{round(current_time, 2)}s] Event: Thumbs Up detected (Confidence: {conf_str})")
+            else:
+                thumbs_up_cooldown += 1
+                if thumbs_up_cooldown >= 5:
+                    thumbs_up_active = False
+
+            # Debounce Hand Raised event: trigger once when hand is raised, don't re-trigger while held
+            if hand_raised:
+                hand_raised_cooldown = 0
+                if not hand_raised_active:
+                    hand_raised_active = True
+                    print(f"[{round(current_time, 2)}s] Event: Hand Raised detected")
+            else:
+                hand_raised_cooldown += 1
+                if hand_raised_cooldown >= 5:
+                    hand_raised_active = False
 
             if results.face_landmarks:
                 landmarks = results.face_landmarks[0]
@@ -239,7 +372,10 @@ def main():
                     round(yaw, 2),
                     round(pitch, 2),
                     round(roll, 2),
-                    head_facing_screen
+                    head_facing_screen,
+                    current_gesture,
+                    round(current_confidence, 4) if current_confidence is not None else None,
+                    hand_raised
                 ]
 
             else:
@@ -254,7 +390,10 @@ def main():
                     None,
                     None,
                     None,
-                    0
+                    0,
+                    current_gesture,
+                    round(current_confidence, 4) if current_confidence is not None else None,
+                    hand_raised
                 ]
 
             csv_writer.writerow(row)
@@ -280,6 +419,26 @@ def main():
                 2
             )
 
+            if current_gesture == "Thumb_Up" and current_confidence is not None:
+                gesture_text = f"Gesture: Thumb_Up ({current_confidence:.2f})"
+            else:
+                gesture_text = "Gesture: None"
+
+            gesture_status = (
+                f"{gesture_text} | "
+                f"Hand Raised: {'Yes' if hand_raised else 'No'}"
+            )
+
+            cv2.putText(
+                frame,
+                gesture_status,
+                (20, 70),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (0, 255, 0),
+                2
+            )
+
             cv2.imshow(
                 "ClassMind AI - Feature Stream",
                 frame
@@ -293,6 +452,7 @@ def main():
         cv2.destroyAllWindows()
         csv_file.close()
         face_landmarker.close()
+        gesture_recognizer.close()
 
         print(
             "Feature logging completed. "
